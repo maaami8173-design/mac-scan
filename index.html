@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MACバーコード読取</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=BIZ+UDGothic:wght@700&family=BIZ+UDPGothic:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<style>
+  :root {
+    --bg: #eef1f0;
+    --panel: #ffffff;
+    --ink: #1b2a2f;
+    --sub: #55656a;
+    --line: #d5dcdb;
+    --frame: #f2c200;
+    --ok: #1e7a46;
+    --warn: #a8501a;
+    --err: #b3261e;
+    color-scheme: light;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11181a; --panel: #1a2326; --ink: #e6eceb; --sub: #9aa9ac; --line: #2c393c;
+      --ok: #5fc48a; --warn: #e59a62; --err: #f08a82; color-scheme: dark;
+    }
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: "BIZ UDPGothic", "Hiragino Sans", "Yu Gothic", sans-serif;
+    display: flex; flex-direction: column;
+  }
+
+  .camera { position: relative; flex: 0 0 42vh; background: #000; overflow: hidden; }
+  #reader { width: 100%; height: 100%; }
+  #reader video { width: 100% !important; height: 100% !important; object-fit: cover; }
+  #reader #qr-shaded-region { border-color: rgba(0,0,0,.45) !important; }
+  #reader #qr-shaded-region > div { background: var(--frame) !important; }
+  .flash { position: absolute; inset: 0; background: var(--frame); opacity: 0; pointer-events: none; transition: opacity .25s; }
+  .flash.on { opacity: .35; transition: none; }
+
+  .panel {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+    background: var(--panel); border-top: 4px solid var(--frame);
+  }
+  .head { padding: 12px 16px 6px; }
+  .count { margin: 0; font-size: 15px; color: var(--sub); }
+  .count b { font-size: 30px; color: var(--ink); margin-right: 2px; }
+  .status { margin: 4px 0 0; font-size: 14px; line-height: 1.5; color: var(--sub); min-height: 1.5em; }
+  .status.ok { color: var(--ok); font-weight: 700; }
+  .status.warn { color: var(--warn); }
+  .status.err { color: var(--err); font-weight: 700; }
+
+  .list { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0; padding: 0 16px; list-style: none; }
+  .list li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .list .no { width: 2.2em; color: var(--sub); font-size: 13px; text-align: right; }
+  .list .mac { flex: 1; font-family: "BIZ UDGothic", ui-monospace, monospace; font-weight: 700; font-size: 18px; letter-spacing: .03em; }
+  .list .del {
+    border: 0; background: transparent; color: var(--sub); font-size: 22px; line-height: 1;
+    padding: 4px 8px; cursor: pointer;
+  }
+  .empty { color: var(--sub); font-size: 14px; padding: 14px 0; }
+
+  .actions { display: flex; gap: 10px; padding: 12px 16px 14px; border-top: 1px solid var(--line); }
+  button.btn {
+    font: inherit; font-size: 17px; font-weight: 700; border-radius: 10px; padding: 15px 12px;
+    border: 2px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer;
+  }
+  button.primary { flex: 1 1 auto; background: var(--frame); border-color: var(--frame); color: #1b2a2f; }
+  button.btn:disabled { opacity: .4; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--ok); outline-offset: 2px; }
+</style>
+</head>
+<body>
+  <div class="camera">
+    <div id="reader"></div>
+    <div class="flash" id="flash"></div>
+  </div>
+
+  <div class="panel">
+    <div class="head">
+      <p class="count"><b id="count">0</b>台 読み取り済み</p>
+      <p class="status" id="status" role="status" aria-live="polite">カメラを起動しています…</p>
+    </div>
+    <ul class="list" id="list"></ul>
+    <div class="actions">
+      <button class="btn" id="clear" type="button">全部消す</button>
+      <button class="btn primary" id="send" type="button" disabled>まとめて送る</button>
+    </div>
+  </div>
+
+<script>
+  // ▼ LINE Developers で発行した LIFF ID に書き換えてください
+  const LIFF_ID = 'ここにLIFF_IDを入れる';
+  const MAX = 200; // 1回で送れる台数の上限
+
+  const $ = (id) => document.getElementById(id);
+  const macs = [];
+  let lastCode = '', lastAt = 0;
+
+  function setStatus(msg, kind) {
+    const el = $('status');
+    el.textContent = msg;
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function render() {
+    $('count').textContent = macs.length;
+    const ul = $('list');
+    ul.innerHTML = '';
+    if (!macs.length) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'MACのバーコードを枠に合わせると、ここに増えていきます。';
+      ul.appendChild(li);
+    }
+    macs.slice().reverse().forEach((mac, i) => {
+      const li = document.createElement('li');
+      const no = document.createElement('span'); no.className = 'no'; no.textContent = macs.length - i;
+      const m = document.createElement('span'); m.className = 'mac'; m.textContent = mac;
+      const del = document.createElement('button');
+      del.className = 'del'; del.type = 'button'; del.textContent = '×';
+      del.setAttribute('aria-label', mac + ' を消す');
+      del.addEventListener('click', () => { macs.splice(macs.indexOf(mac), 1); render(); setStatus(mac + ' を消しました。'); });
+      li.append(no, m, del);
+      ul.appendChild(li);
+    });
+    $('send').disabled = !macs.length;
+    $('send').textContent = macs.length ? 'まとめて送る（' + macs.length + '台）' : 'まとめて送る';
+  }
+
+  // バーコードの中身をMAC表記にそろえる。MACでなければ null
+  function toMac(raw) {
+    let s = String(raw).trim().toUpperCase();
+    s = s.replace(/^MAC\s*(ADDRESS)?\s*[:：]?\s*/, '');
+    if (!/^[0-9A-F:\-.\s]+$/.test(s)) return null;
+    const hex = s.replace(/[^0-9A-F]/g, '');
+    return hex.length === 12 ? hex.match(/.{2}/g).join(':') : null;
+  }
+
+  function flash() {
+    const f = $('flash');
+    f.classList.add('on');
+    requestAnimationFrame(() => requestAnimationFrame(() => f.classList.remove('on')));
+  }
+
+  function onDecode(text) {
+    const now = Date.now();
+    if (text === lastCode && now - lastAt < 2000) return; // 同じバーコードを連続で拾わない
+    lastCode = text; lastAt = now;
+
+    const mac = toMac(text);
+    if (!mac) {
+      setStatus('MAC以外のバーコードです（' + String(text).slice(0, 24) + '）。MACの段を読み取ってください。', 'warn');
+      return;
+    }
+    if (macs.indexOf(mac) >= 0) { setStatus(mac + ' は読み取り済みです。', 'warn'); return; }
+    if (macs.length >= MAX) { setStatus('1回で送れるのは' + MAX + '台までです。いったん送ってください。', 'err'); return; }
+
+    macs.push(mac);
+    if (navigator.vibrate) navigator.vibrate(50);
+    flash();
+    render();
+    if (/^[0-9:]+$/.test(mac)) setStatus(mac + ' は数字だけのコードです。S/NではなくMACか確認してください。', 'warn');
+    else setStatus(mac + ' を追加しました。続けて読み取れます。', 'ok');
+  }
+
+  async function startScanner() {
+    const F = Html5QrcodeSupportedFormats;
+    const scanner = new Html5Qrcode('reader', {
+      formatsToSupport: [F.CODE_128, F.CODE_39, F.CODE_93, F.ITF, F.EAN_13, F.QR_CODE, F.DATA_MATRIX],
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      verbose: false
+    });
+    try {
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 12, qrbox: (w, h) => ({ width: Math.floor(w * 0.88), height: Math.floor(Math.min(h * 0.5, w * 0.36)) }) },
+        onDecode,
+        () => {}
+      );
+      setStatus('MACのバーコードを枠に合わせてください。何台でも続けて読めます。');
+    } catch (e) {
+      setStatus('カメラを起動できません。LINEのカメラ許可を確認するか、ラベルの写真をトークに送ってください。', 'err');
+    }
+  }
+
+  async function send() {
+    if (!macs.length) return;
+    $('send').disabled = true;
+    try {
+      await liff.sendMessages([{ type: 'text', text: 'MAC:\n' + macs.join('\n') }]);
+      setStatus('送信しました。トークに戻ります。', 'ok');
+      liff.closeWindow();
+    } catch (e) {
+      setStatus('送信できませんでした：' + (e.message || e), 'err');
+      $('send').disabled = false;
+    }
+  }
+
+  $('send').addEventListener('click', send);
+  $('clear').addEventListener('click', () => {
+    if (!macs.length) return;
+    if (confirm(macs.length + '台分の読み取りを全部消しますか？')) { macs.length = 0; render(); setStatus('全部消しました。'); }
+  });
+
+  (async () => {
+    render();
+    try {
+      await liff.init({ liffId: LIFF_ID });
+    } catch (e) {
+      setStatus('LINEの起動に失敗しました：' + (e.message || e), 'err');
+      return;
+    }
+    if (!liff.isInClient()) setStatus('LINEアプリ内のメニューから開いてください（ブラウザからは送信できません）。', 'warn');
+    startScanner();
+  })();
+</script>
+</body>
+</html>
